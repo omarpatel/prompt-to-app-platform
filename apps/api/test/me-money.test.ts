@@ -1,0 +1,395 @@
+import type { Request, Response } from "express";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * The two money-out flows real users depend on:
+ *  - claim: a launcher converts their accrued fee share (LAUNCHER ledger balance) into an ETH payout
+ *    from the treasury. The double-spend guard (write the clearing entry, re-check, roll back on any
+ *    failure) is the load-bearing part — a bug here double-pays or strands fees.
+ *  - withdraw: server-signs an ETH transfer, or a USDG EIP-3009 authorization the treasury relays,
+ *    out of the caller's custodial wallet. The balance gates, the gas reserve and the daily USD cap
+ *    are what stop a transfer that would fail mid-flight or drain a compromised session.
+ * Everything below the HTTP layer is faked, so this is pure decision-logic with no I/O.
+ */
+
+interface LedgerRow {
+  id: string;
+  account: string;
+  deltaMicros: bigint;
+  refType?: string;
+  refId?: string;
+  memo?: string;
+}
+
+const fx = vi.hoisted(() => {
+  const ledger: LedgerRow[] = [];
+  const treasuryEntries: LedgerRow[] = [];
+  const state: { ethPriceUsd: number; solPriceUsd: number; solanaEnabled: boolean; transfer: "ok" | "failed" | "unconfirmed"; ethBalance: bigint; usdgBalance: bigint; solBalance: bigint; dailyUsed: bigint } = {
+    ethPriceUsd: 2000,
+    solPriceUsd: 120,
+    solanaEnabled: true,
+    transfer: "ok",
+    ethBalance: 0n,
+    usdgBalance: 0n,
+    solBalance: 0n,
+    dailyUsed: 0n,
+  };
+  const SOL_SIG = "5wHu1qwD4E3vTd9nJqvUeYtWuDL1yiLFJVXDQzVdYc3PtLHRZAx9y1n2Cz3wVn3nS4eZfLPaJRBk6eZB4bHzAYS";
+  const HASH = "0x" + "a1".repeat(32);
+  class TransactionUnconfirmedError extends Error {
+    constructor(readonly hash: string) {
+      super(`transaction ${hash} broadcast but unconfirmed`);
+    }
+  }
+  let seq = 0;
+  return {
+    ledger,
+    treasuryEntries,
+    state,
+    HASH,
+    TransactionUnconfirmedError,
+    getEthPriceUsd: vi.fn(async () => state.ethPriceUsd),
+    transferEth: vi.fn(async (_from: unknown, _to: string, _wei: bigint) => {
+      if (state.transfer === "failed") throw new Error("rpc down");
+      if (state.transfer === "unconfirmed") throw new TransactionUnconfirmedError(HASH);
+      return HASH;
+    }),
+    signUsdgAuthorization: vi.fn(async (_account: unknown, opts: { to: string; units: bigint }) => ({ from: "0xcustodial", to: opts.to, value: opts.units })),
+    relayUsdgAuthorization: vi.fn(async () => {
+      if (state.transfer === "failed") throw new Error("rpc down");
+      return "0x" + "b2".repeat(32);
+    }),
+    custodialEthBalance: vi.fn(async () => state.ethBalance),
+    custodialUsdgBalance: vi.fn(async () => state.usdgBalance),
+    custodialSolBalance: vi.fn(async () => state.solBalance),
+    custodialAccount: vi.fn(() => ({ address: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" })),
+    SOL_SIG,
+    transferNative: vi.fn(async (_from: unknown, _to: string, _lamports: bigint) => {
+      if (state.transfer === "failed") throw new Error("rpc down");
+      return { hash: SOL_SIG, block: 1 };
+    }),
+    solanaEnabled: () => state.solanaEnabled,
+    writeAudit: vi.fn(async () => undefined),
+    aggregate: vi.fn(async ({ where }: { where: { account: string } }) => ({
+      _sum: { deltaMicros: ledger.filter((e) => e.account === where.account).reduce((a, e) => a + e.deltaMicros, 0n) },
+    })),
+    ledgerCreate: vi.fn(async ({ data }: { data: Omit<LedgerRow, "id"> }) => {
+      const row: LedgerRow = { id: `led_${++seq}`, ...data };
+      (data.account === "TREASURY" ? treasuryEntries : ledger).push(row);
+      return row;
+    }),
+    ledgerDelete: vi.fn(async ({ where }: { where: { id: string } }) => {
+      const i = ledger.findIndex((e) => e.id === where.id);
+      if (i >= 0) ledger.splice(i, 1);
+      return {};
+    }),
+    ledgerUpdate: vi.fn(async () => ({})),
+    dailyUpsert: vi.fn(async () => ({})),
+    dailyUpdateMany: vi.fn(async ({ where, data }: { where: { usedMicros?: { lte: bigint } }; data: { usedMicros: { increment?: bigint; decrement?: bigint } } }) => {
+      const inc = data.usedMicros.increment;
+      const dec = data.usedMicros.decrement;
+      if (inc !== undefined) {
+        const lte = where.usedMicros?.lte;
+        if (lte !== undefined && state.dailyUsed > lte) return { count: 0 };
+        state.dailyUsed += inc;
+        return { count: 1 };
+      }
+      if (dec !== undefined) {
+        state.dailyUsed -= dec;
+        return { count: 1 };
+      }
+      return { count: 0 };
+    }),
+    dailyFindUnique: vi.fn(async () => ({ usedMicros: state.dailyUsed })),
+  };
+});
+
+vi.mock("@appgen/db", () => ({
+  prisma: {
+    ledgerEntry: { create: fx.ledgerCreate, delete: fx.ledgerDelete, update: fx.ledgerUpdate },
+    dailyWithdraw: { upsert: fx.dailyUpsert, updateMany: fx.dailyUpdateMany, findUnique: fx.dailyFindUnique },
+  },
+}));
+vi.mock("@appgen/chain", () => ({
+  getEthPriceUsd: fx.getEthPriceUsd,
+  transferEth: fx.transferEth,
+  TransactionUnconfirmedError: fx.TransactionUnconfirmedError,
+  signUsdgAuthorization: fx.signUsdgAuthorization,
+  relayUsdgAuthorization: fx.relayUsdgAuthorization,
+  getErc20Balance: async () => 0n,
+  explorerTxUrl: (h: string) => `https://explorer.test/tx/${h}`,
+  treasury: () => ({ address: "0x0000000000000000000000000000000000000001", account: { address: "0x0000000000000000000000000000000000000001" } }),
+  solanaEnabled: fx.solanaEnabled,
+  adapterFor: () => ({
+    info: { chain: "solana", launchpad: "pump_fun", native: { symbol: "SOL", decimals: 9 } },
+    isAddress: (a: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a),
+    userWallet: () => ({ chain: "solana", address: "So1anaUser111111111111111111111111111111111", signer: {} }),
+    nativePriceUsd: async () => fx.state.solPriceUsd,
+    transferNative: fx.transferNative,
+  }),
+}));
+vi.mock("../src/lib/metrics.js", () => ({ db: { ledgerEntry: { aggregate: fx.aggregate } } }));
+// The shared cache tier is JSON: round-tripping every cached value is what a Redis hit does to it.
+vi.mock("../src/lib/cache.js", () => ({ cached: async <T,>(_k: unknown, _ttl: unknown, fn: () => Promise<T>): Promise<T> => JSON.parse(JSON.stringify(await fn())) as T }));
+vi.mock("../src/lib/custodial.js", () => ({
+  custodialAccount: fx.custodialAccount,
+  custodialEthBalance: fx.custodialEthBalance,
+  custodialUsdgBalance: fx.custodialUsdgBalance,
+  custodialSolBalance: fx.custodialSolBalance,
+  GAS_RESERVE_WEI: 20_000_000_000_000n,
+  GAS_RESERVE_BY_CHAIN: { robinhood: 20_000_000_000_000n, solana: 2_000_000n },
+}));
+vi.mock("../src/lib/audit.js", () => ({ writeAudit: fx.writeAudit }));
+vi.mock("../src/lib/launch.js", () => ({ launchesLast24h: async () => 0 }));
+vi.mock("../src/lib/identity.js", () => ({ ensureSolWallet: async (u: unknown) => u }));
+vi.mock("../src/lib/trade.js", () => ({ executeFor: vi.fn(), quoteFor: vi.fn(), recordTrade: vi.fn() }));
+vi.mock("../src/lib/dto.js", () => ({
+  usd: (m: bigint) => Number(m) / 1e6,
+  tokens: (t: bigint) => Number(t) / 1e18,
+  pctOfSupply: () => 0,
+  appSummary: () => ({}),
+  appExtrasByApp: async () => ({}),
+  launchDto: () => ({}),
+  tradeDto: () => ({}),
+  APP_SUMMARY_SELECT: {},
+}));
+
+import { balancesOf, claimHandler, withdrawHandler } from "../src/routes/me.js";
+
+interface TestUser {
+  id: string;
+  wallet: string | null;
+  solWallet: string | null;
+  walletIndex: number;
+  reputation: number;
+}
+const SOL_WALLET = "So1anaUser111111111111111111111111111111111";
+const USER: TestUser = { id: "u1", wallet: "0x90F79bf6EB2c4f870365E785982E1f101E93b906", solWallet: SOL_WALLET, walletIndex: 5, reputation: 0 };
+const req = (body: Record<string, unknown> = {}, user: TestUser = USER): Request => ({ body, user }) as unknown as Request;
+const res = (): { r: Response; c: { status: number; body: unknown } } => {
+  const c = { status: 200, body: undefined as unknown };
+  const r = {
+    status(code: number) {
+      c.status = code;
+      return r;
+    },
+    json(p: unknown) {
+      c.body = p;
+      return r;
+    },
+    setHeader() {
+      return r;
+    },
+  } as unknown as Response;
+  return { r, c };
+};
+const balance = (): bigint => fx.ledger.filter((e) => e.account === "LAUNCHER:u1").reduce((a, e) => a + e.deltaMicros, 0n);
+
+beforeEach(() => {
+  fx.ledger.length = 0;
+  fx.treasuryEntries.length = 0;
+  fx.state.ethPriceUsd = 2000;
+  fx.state.solPriceUsd = 120;
+  fx.state.solanaEnabled = true;
+  fx.state.transfer = "ok";
+  fx.state.ethBalance = 0n;
+  fx.state.usdgBalance = 0n;
+  fx.state.solBalance = 0n;
+  fx.state.dailyUsed = 0n;
+  for (const f of [fx.transferEth, fx.transferNative, fx.custodialSolBalance, fx.signUsdgAuthorization, fx.relayUsdgAuthorization, fx.writeAudit, fx.ledgerCreate, fx.ledgerDelete, fx.ledgerUpdate, fx.aggregate, fx.dailyUpsert, fx.dailyUpdateMany, fx.dailyFindUnique]) f.mockClear();
+});
+
+describe("claim (fee payout)", () => {
+  it("pays out the full LAUNCHER balance in ETH at the current price, zeroes the ledger, and debits the treasury once", async () => {
+    fx.ledger.push({ id: "seed", account: "LAUNCHER:u1", deltaMicros: 5_000_000n }); // $5 accrued at $2000/ETH = 0.0025 ETH
+    const { r, c } = res();
+    await claimHandler(req(), r);
+
+    expect(balance()).toBe(0n);
+    expect(fx.transferEth).toHaveBeenCalledTimes(1);
+    expect(fx.transferEth.mock.calls[0]?.[1]).toBe(USER.wallet);
+    expect(fx.transferEth.mock.calls[0]?.[2]).toBe(2_500_000_000_000_000n);
+    expect(fx.treasuryEntries).toHaveLength(1);
+    expect(fx.treasuryEntries[0]).toMatchObject({ deltaMicros: -5_000_000n });
+    expect(c.body).toMatchObject({ usdMicros: "5000000", wei: "2500000000000000", txHash: "0x" + "a1".repeat(32) });
+  });
+
+  it("rolls the clearing entry back and pays nothing when the payout provably failed", async () => {
+    fx.ledger.push({ id: "seed", account: "LAUNCHER:u1", deltaMicros: 5_000_000n });
+    fx.state.transfer = "failed";
+    const { r } = res();
+    await expect(claimHandler(req(), r)).rejects.toMatchObject({ status: 502, message: "claim_payout_failed" });
+    expect(balance()).toBe(5_000_000n);
+    expect(fx.treasuryEntries).toHaveLength(0);
+  });
+
+  it("keeps the clearing entry (balance stays zero) and hands the hash to reconcile when the payout was broadcast but unconfirmed", async () => {
+    fx.ledger.push({ id: "seed", account: "LAUNCHER:u1", deltaMicros: 5_000_000n });
+    fx.state.transfer = "unconfirmed";
+    const { r } = res();
+    await expect(claimHandler(req(), r)).rejects.toMatchObject({ status: 502, message: "claim_unconfirmed", extra: { txHash: fx.HASH } });
+    // Releasing the balance here would let the launcher claim the same funds twice if the first payout mines.
+    expect(balance()).toBe(0n);
+    expect(fx.ledgerUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: { memo: `fees claim unconfirmed ${fx.HASH}` } }));
+    expect(fx.treasuryEntries).toHaveLength(0); // the treasury debit is written by reconcile once the receipt confirms
+    expect(fx.writeAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "PAYOUT_UNCONFIRMED", targetType: "LedgerEntry", meta: expect.objectContaining({ kind: "FEES_CLAIM", txHash: fx.HASH }) }));
+  });
+
+  it("rejects a claim below the $1 floor without touching the ledger or treasury", async () => {
+    fx.ledger.push({ id: "seed", account: "LAUNCHER:u1", deltaMicros: 500_000n }); // $0.50
+    const { r } = res();
+    await expect(claimHandler(req(), r)).rejects.toMatchObject({ status: 400, message: "nothing_to_claim" });
+    expect(fx.transferEth).not.toHaveBeenCalled();
+    expect(balance()).toBe(500_000n);
+  });
+
+  it("aborts as claim_in_progress when a concurrent claim already cleared the balance", async () => {
+    fx.ledger.push({ id: "seed", account: "LAUNCHER:u1", deltaMicros: 5_000_000n });
+    fx.aggregate
+      .mockImplementationOnce(async () => ({ _sum: { deltaMicros: 5_000_000n } }))
+      .mockImplementationOnce(async () => ({ _sum: { deltaMicros: -5_000_000n } }));
+    const { r } = res();
+    await expect(claimHandler(req(), r)).rejects.toMatchObject({ status: 409, message: "claim_in_progress" });
+    expect(fx.transferEth).not.toHaveBeenCalled();
+  });
+
+  it("requires a wallet on the account", async () => {
+    const { r } = res();
+    await expect(claimHandler(req({}, { ...USER, wallet: null }), r)).rejects.toMatchObject({ status: 400, message: "wallet_required" });
+  });
+});
+
+describe("balances", () => {
+  it("survive the JSON cache tier as decimal strings (a BigInt would fail to serialize and 500 /v1/me)", async () => {
+    fx.state.ethBalance = 123_000_000_000_000_000n;
+    fx.state.usdgBalance = 4_500_000n;
+    fx.state.solBalance = 2_500_000_000n;
+    expect(await balancesOf(USER.wallet as `0x${string}`, SOL_WALLET)).toEqual({ ethWei: "123000000000000000", usdgUnits: "4500000", ethPriceUsd: 2000, solLamports: "2500000000", solPriceUsd: 120 });
+  });
+
+  it("report zero SOL without touching the Solana adapter while the venue is disabled", async () => {
+    fx.state.solanaEnabled = false;
+    fx.state.solBalance = 2_500_000_000n;
+    expect(await balancesOf(USER.wallet as `0x${string}`, null)).toMatchObject({ solLamports: "0", solPriceUsd: 0 });
+    expect(fx.custodialSolBalance).not.toHaveBeenCalled();
+  });
+});
+
+describe("withdraw (custodial payout)", () => {
+  const DEST = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
+
+  it("server-signs an ETH transfer when the balance covers amount + gas reserve", async () => {
+    fx.state.ethBalance = 200_000_000_000_000_000n; // 0.2 ETH
+    const { r, c } = res();
+    await withdrawHandler(req({ asset: "ETH", to: DEST, amount: 0.1 }), r);
+    expect(fx.transferEth).toHaveBeenCalledTimes(1);
+    expect(fx.transferEth.mock.calls[0]?.[1]).toBe(DEST);
+    expect(fx.transferEth.mock.calls[0]?.[2]).toBe(100_000_000_000_000_000n);
+    expect(fx.writeAudit).toHaveBeenCalledTimes(1);
+    expect(c.body).toMatchObject({ asset: "ETH", amount: "100000000000000000", txHash: "0x" + "a1".repeat(32) });
+    // $200 at $2000/ETH reserved against the daily cap.
+    expect(fx.state.dailyUsed).toBe(200_000_000n);
+  });
+
+  it("blocks an ETH withdraw that would leave nothing for gas", async () => {
+    fx.state.ethBalance = 100_000_000_000_000_000n; // exactly the amount, no gas headroom
+    const { r, c } = res();
+    await expect(withdrawHandler(req({ asset: "ETH", to: DEST, amount: 0.1 }), r)).rejects.toMatchObject({ status: 400, message: "insufficient_balance" });
+    expect(fx.transferEth).not.toHaveBeenCalled();
+    expect(c.body).toBeUndefined();
+  });
+
+  it("relays a USDG EIP-3009 authorization through the treasury even when the wallet holds no ETH", async () => {
+    fx.state.ethBalance = 0n;
+    fx.state.usdgBalance = 10_000_000n; // $10
+    const { r, c } = res();
+    await withdrawHandler(req({ asset: "USDG", to: DEST, amount: 5 }), r);
+    expect(fx.signUsdgAuthorization).toHaveBeenCalledTimes(1);
+    expect(fx.signUsdgAuthorization.mock.calls[0]?.[1]).toMatchObject({ to: DEST, units: 5_000_000n });
+    expect(fx.relayUsdgAuthorization).toHaveBeenCalledTimes(1);
+    expect(fx.transferEth).not.toHaveBeenCalled();
+    expect(c.body).toMatchObject({ asset: "USDG", amount: "5000000", txHash: "0x" + "b2".repeat(32) });
+    expect(fx.state.dailyUsed).toBe(5_000_000n);
+  });
+
+  it("blocks a USDG withdraw larger than the token balance", async () => {
+    fx.state.usdgBalance = 1_000_000n; // $1
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "USDG", to: DEST, amount: 5 }), r)).rejects.toMatchObject({ status: 400, message: "insufficient_balance" });
+    expect(fx.relayUsdgAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("rejects a withdraw that would breach the daily USD cap, before any transfer", async () => {
+    fx.state.usdgBalance = 3_000_000_000n; // $3000 on hand
+    fx.state.dailyUsed = 24_000_000_000n; // $24k already withdrawn today
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "USDG", to: DEST, amount: 2000 }), r)).rejects.toMatchObject({
+      status: 400,
+      message: "daily_limit_exceeded",
+    });
+    expect(fx.relayUsdgAuthorization).not.toHaveBeenCalled();
+    expect(fx.writeAudit).not.toHaveBeenCalled();
+  });
+
+  it("releases the daily reservation when the on-chain transfer fails, so a retry isn't blocked", async () => {
+    fx.state.ethBalance = 200_000_000_000_000_000n;
+    fx.state.transfer = "failed";
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "ETH", to: DEST, amount: 0.1 }), r)).rejects.toMatchObject({ status: 502 });
+    expect(fx.state.dailyUsed).toBe(0n); // reserved then released — nothing consumed
+    expect(fx.writeAudit).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed destination address", async () => {
+    fx.state.ethBalance = 200_000_000_000_000_000n;
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "ETH", to: "0x5fc5360d0400a0fd4f2af552add042d716f1D168", amount: 0.1 }), r)).rejects.toMatchObject({ status: 400, message: "validation_failed" });
+    expect(fx.transferEth).not.toHaveBeenCalled();
+  });
+
+  it("refuses a withdraw to the user's own custodial wallet", async () => {
+    fx.state.ethBalance = 200_000_000_000_000_000n;
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "ETH", to: USER.wallet, amount: 0.1 }), r)).rejects.toMatchObject({ status: 400, message: "cannot_withdraw_to_self" });
+  });
+});
+
+describe("withdraw SOL (custodial Solana wallet)", () => {
+  const DEST = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
+
+  it("server-signs a SOL transfer from the Solana wallet when the balance covers amount + rent reserve, priced against the daily cap in SOL", async () => {
+    fx.state.solBalance = 1_500_000_000n; // 1.5 SOL
+    const { r, c } = res();
+    await withdrawHandler(req({ asset: "SOL", to: DEST, amount: 1 }), r);
+    expect(fx.transferNative).toHaveBeenCalledTimes(1);
+    const [account, to, lamports] = fx.transferNative.mock.calls[0]!;
+    expect(account).toMatchObject({ chain: "solana", address: SOL_WALLET });
+    expect([to, lamports]).toEqual([DEST, 1_000_000_000n]);
+    expect(fx.transferEth).not.toHaveBeenCalled();
+    expect(c.body).toMatchObject({ asset: "SOL", to: DEST, amount: "1000000000", txHash: fx.SOL_SIG, explorerUrl: `https://solscan.io/tx/${fx.SOL_SIG}` });
+    // 1 SOL at $120 reserved against the daily cap.
+    expect(fx.state.dailyUsed).toBe(120_000_000n);
+  });
+
+  it("keeps the rent-exempt reserve: exactly the amount in the wallet is not enough", async () => {
+    fx.state.solBalance = 1_000_000_000n;
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "SOL", to: DEST, amount: 1 }), r)).rejects.toMatchObject({ status: 400, message: "insufficient_balance" });
+    expect(fx.transferNative).not.toHaveBeenCalled();
+  });
+
+  it("rejects an EVM destination for SOL at the schema, and a SOL withdraw while the venue is disabled", async () => {
+    fx.state.solBalance = 10_000_000_000n;
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "SOL", to: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", amount: 1 }), r)).rejects.toMatchObject({ status: 400, message: "validation_failed" });
+    fx.state.solanaEnabled = false;
+    await expect(withdrawHandler(req({ asset: "SOL", to: DEST, amount: 1 }), r)).rejects.toMatchObject({ status: 409, message: "venue_disabled" });
+    expect(fx.transferNative).not.toHaveBeenCalled();
+  });
+
+  it("refuses a withdraw to the user's own Solana wallet", async () => {
+    fx.state.solBalance = 10_000_000_000n;
+    const { r } = res();
+    await expect(withdrawHandler(req({ asset: "SOL", to: SOL_WALLET, amount: 1 }), r)).rejects.toMatchObject({ status: 400, message: "cannot_withdraw_to_self" });
+  });
+});

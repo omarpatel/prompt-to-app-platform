@@ -1,0 +1,329 @@
+import { Router } from "express";
+import type { Request, Response } from "express";
+import { z } from "zod";
+import type { Address } from "viem";
+import { big, dec, prisma, type App } from "@appgen/db";
+import { TransactionUnconfirmedError, getEthPriceUsd, transferErc20, transferEth, explorerTxUrl } from "@appgen/chain";
+import { FEE_SPLIT_BPS, AppgenStakeBody, TOKEN_DECIMALS, decimalToUnits, explorerTokenUrl, ponsUrl, weiFromUsdMicros, type AppgenPageDto } from "@appgen/shared";
+import { optionalAuth, requireAuth } from "../lib/auth.js";
+import { writeAudit } from "../lib/audit.js";
+import { APPS_TAG, cached } from "../lib/cache.js";
+import { custodialAccount, custodialEthBalance, GAS_RESERVE_WEI } from "../lib/custodial.js";
+import { pctOfSupply, appgenBurnDto, stakeDto } from "../lib/dto.js";
+import { HttpError, parse, wrap } from "../lib/errors.js";
+import { assertPayoutsAllowed } from "../lib/freeze.js";
+import { sendCached } from "../lib/http.js";
+import { logger } from "../lib/logger.js";
+import { db } from "../lib/metrics.js";
+import { marketSnapshot } from "../lib/market.js";
+import { TREASURY_ACCOUNT, TREASURY_WALLET } from "../lib/treasury.js";
+import { PLATFORM_PROPOSAL_MIN_HOLD, appgenBalance } from "../lib/votes.js";
+import { env } from "../env.js";
+
+export const appgen = Router();
+
+type AppRef = Pick<App, "id" | "slug" | "name" | "ticker">;
+const APP_REF = { id: true, slug: true, name: true, ticker: true } as const;
+
+/** Platform-wide $APPGEN aggregates: identical for every viewer, so cached and shared. */
+const loadOverview = async (): Promise<Omit<AppgenPageDto, "viewer">> => {
+  const [fees, balance, burned, staked, stakers, top, burns, proposalsOpen, proposalsShipped] = await db.$transaction([
+    db.ledgerEntry.aggregate({ where: { account: "APPGEN_TOKEN", refType: "FeeEvent" }, _sum: { deltaMicros: true } }),
+    // What is still to be bought: the running APPGEN_TOKEN balance, net of every debit already claimed by a burn.
+    db.ledgerEntry.aggregate({ where: { account: "APPGEN_TOKEN" }, _sum: { deltaMicros: true } }),
+    // Only settled burns count as burned: a failed or in-flight AppgenBurn has debited the ledger but burned nothing yet.
+    db.appgenBurn.aggregate({ where: { status: "BURNED" }, _sum: { usdMicros: true } }),
+    db.appgenStake.aggregate({ where: { withdrawnAt: null }, _sum: { amount: true, earnedMicros: true } }),
+    // COUNT(DISTINCT) in the database instead of materializing every staker wallet.
+    db.$queryRaw<Array<{ count: bigint }>>`SELECT COUNT(DISTINCT "wallet")::bigint AS count FROM "AppgenStake" WHERE "withdrawnAt" IS NULL`,
+    db.appgenStake.groupBy({ by: ["appId"], where: { withdrawnAt: null }, _sum: { amount: true }, _count: { _all: true }, orderBy: { _sum: { amount: "desc" } }, take: 10 }),
+    db.appgenBurn.findMany({ where: { status: "BURNED" }, orderBy: { completedAt: "desc" }, take: 20 }),
+    db.proposal.count({ where: { status: "OPEN" } }),
+    db.proposal.count({ where: { status: "SHIPPED" } }),
+  ]);
+  const [market, topApps] = await Promise.all([
+    marketSnapshot(),
+    top.length > 0 ? db.app.findMany({ where: { id: { in: top.map((t) => t.appId) } }, select: APP_REF }) : Promise.resolve([]),
+  ]);
+  const snapshot = market?.appgenToken ?? null;
+  const appById: Record<string, AppRef> = {};
+  for (const a of topApps) appById[a.id] = a;
+  const accrued = fees._sum.deltaMicros ?? 0n;
+  const burnedMicros = burned._sum.usdMicros ?? 0n;
+  const burnedUnits = snapshot ? BigInt(snapshot.burnedUnits) : 0n;
+  return {
+    launched: snapshot !== null,
+    token: snapshot
+      ? {
+          address: snapshot.address,
+          name: snapshot.name,
+          symbol: snapshot.symbol,
+          phase: snapshot.phase,
+          curveAddress: snapshot.curveAddress,
+          poolId: snapshot.phase >= 2 ? snapshot.poolId : null,
+          progress: snapshot.progress,
+          priceUsd: snapshot.priceUsd,
+          priceEth: snapshot.priceEth,
+          mcapUsd: snapshot.mcapUsd,
+          totalSupplyUnits: snapshot.totalSupplyUnits,
+          burnedUnits: snapshot.burnedUnits,
+          burnedPct: pctOfSupply(burnedUnits),
+          ponsUrl: ponsUrl(snapshot.address),
+          explorerUrl: explorerTokenUrl(snapshot.address, env.BLOCKSCOUT_URL),
+        }
+      : null,
+    ledger: { accruedMicros: accrued.toString(), burnedMicros: burnedMicros.toString(), pendingMicros: (balance._sum.deltaMicros ?? 0n).toString() },
+    feeShareBps: FEE_SPLIT_BPS.APPGEN_TOKEN,
+    stakes: {
+      totalUnits: big(staked._sum.amount).toString(),
+      stakers: Number(stakers[0]?.count ?? 0n),
+      earnedMicros: (staked._sum.earnedMicros ?? 0n).toString(),
+    },
+    burns: burns.map(appgenBurnDto),
+    proposals: { open: proposalsOpen, shipped: proposalsShipped },
+    topStakes: top.flatMap((t) => {
+      const a = appById[t.appId];
+      return a ? [{ appId: a.id, appSlug: a.slug, appName: a.name, appTicker: a.ticker, units: big(t._sum.amount).toString(), stakers: t._count._all }] : [];
+    }),
+  };
+};
+
+/** A staker's own positions are capped: a wallet cannot force an unbounded page. */
+const MY_STAKES_MAX = 100;
+
+appgen.get(
+  "/",
+  optionalAuth,
+  wrap(async (req, res) => {
+    const overview = await cached("appgen.overview", 30_000, loadOverview, [APPS_TAG]);
+    const wallet = req.user?.wallet as Address | undefined;
+    if (!wallet) {
+      sendCached(res, { ...overview, viewer: null } satisfies AppgenPageDto, { maxAge: 30, swr: 120 });
+      return;
+    }
+    const [mine, units] = await Promise.all([
+      db.appgenStake.findMany({ where: { wallet }, orderBy: { createdAt: "desc" }, take: MY_STAKES_MAX }),
+      appgenBalance(wallet),
+    ]);
+    const mineApps = mine.length > 0 ? await db.app.findMany({ where: { id: { in: mine.map((s) => s.appId) } }, select: APP_REF }) : [];
+    const appById: Record<string, AppRef> = {};
+    for (const a of mineApps) appById[a.id] = a;
+    let stakedUnits = 0n;
+    let earnedMicros = 0n;
+    for (const s of mine) {
+      if (s.withdrawnAt) continue;
+      stakedUnits += big(s.amount);
+      earnedMicros += s.earnedMicros;
+    }
+    const body: AppgenPageDto = {
+      ...overview,
+      viewer: {
+        units: units.toString(),
+        stakedUnits: stakedUnits.toString(),
+        earnedMicros: earnedMicros.toString(),
+        canPropose: units >= PLATFORM_PROPOSAL_MIN_HOLD,
+        stakes: mine.map((s) => stakeDto(s, appById[s.appId])),
+      },
+    };
+    sendCached(res, body, { maxAge: 0, private: true });
+  }),
+);
+
+/** Moves $APPGEN from the caller's custodial wallet into the treasury stake vault. */
+export const appgenStakeHandler = async (req: Request, res: Response): Promise<void> => {
+  assertPayoutsAllowed();
+  const user = req.user!;
+  if (!env.APPGEN_TOKEN) throw new HttpError(503, "appgen_not_launched");
+  if (!user.wallet) throw new HttpError(400, "wallet_required");
+  const wallet = user.wallet as Address;
+  const body = parse(AppgenStakeBody, req.body);
+  const app = await prisma.app.findUnique({ where: { id: body.appId }, select: { id: true, slug: true, name: true, ticker: true, status: true } });
+  if (!app) throw new HttpError(404, "app_not_found");
+  if (app.status !== "LIVE" && app.status !== "DORMANT") throw new HttpError(409, "app_not_live");
+  const amount = decimalToUnits(body.amount.toString(), TOKEN_DECIMALS);
+  if (amount <= 0n) throw new HttpError(400, "invalid_amount");
+  const [balance, gas] = await Promise.all([appgenBalance(wallet), custodialEthBalance(wallet)]);
+  if (balance < amount) throw new HttpError(400, "insufficient_balance", { haveUnits: balance.toString(), needUnits: amount.toString() });
+  if (gas < GAS_RESERVE_WEI) throw new HttpError(400, "insufficient_gas", { haveWei: gas.toString(), needWei: GAS_RESERVE_WEI.toString() });
+  let depositTx: string;
+  try {
+    depositTx = await transferErc20(custodialAccount(user), env.APPGEN_TOKEN, TREASURY_WALLET, amount);
+  } catch (err) {
+    logger.error({ err, appId: app.id, userId: user.id }, "appgen stake transfer failed");
+    throw new HttpError(502, "stake_failed");
+  }
+  const stake = await prisma.appgenStake.create({ data: { wallet, appId: app.id, amount: dec(amount), depositTx } });
+  res.status(201).json(stakeDto(stake, app));
+};
+
+appgen.post("/stake", requireAuth, wrap(appgenStakeHandler));
+
+const UnstakeBody = z.object({ stakeId: z.string().min(1) });
+
+appgen.post(
+  "/unstake",
+  requireAuth,
+  wrap(async (req, res) => {
+    const user = req.user!;
+    if (!env.APPGEN_TOKEN) throw new HttpError(503, "appgen_not_launched");
+    const body = parse(UnstakeBody, req.body);
+    const stake = await prisma.appgenStake.findUnique({ where: { id: body.stakeId } });
+    if (!stake) throw new HttpError(404, "stake_not_found");
+    if (stake.wallet !== user.wallet) throw new HttpError(403, "forbidden");
+    if (stake.withdrawnAt) throw new HttpError(409, "already_withdrawn");
+    // Mark first so a double-submit cannot trigger two payouts. Rolled back only when the transfer
+    // provably moved nothing; a broadcast with an unreadable receipt may still mine, so the stake
+    // stays withdrawn with its tx and the runner's PAYOUTS reconcile settles it from the receipt.
+    const marked = await prisma.appgenStake.updateMany({ where: { id: stake.id, withdrawnAt: null }, data: { withdrawnAt: new Date() } });
+    if (marked.count === 0) throw new HttpError(409, "already_withdrawn");
+    let withdrawTx: string;
+    try {
+      withdrawTx = await transferErc20(TREASURY_ACCOUNT, env.APPGEN_TOKEN, stake.wallet as Address, big(stake.amount));
+    } catch (err) {
+      if (err instanceof TransactionUnconfirmedError) {
+        logger.error({ err, stakeId: stake.id, txHash: err.hash }, "unstake transfer unconfirmed; stake kept withdrawn for reconcile");
+        await prisma.appgenStake.update({ where: { id: stake.id }, data: { withdrawTx: err.hash } });
+        await writeAudit({
+          actorId: user.id,
+          actor: `user:${user.id}`,
+          action: "PAYOUT_UNCONFIRMED",
+          targetType: "AppgenStake",
+          targetId: stake.id,
+          meta: { kind: "APPGEN_UNSTAKE", txHash: err.hash, wallet: stake.wallet, amount: big(stake.amount).toString() },
+        }).catch((e: unknown) => logger.error({ err: e, stakeId: stake.id }, "unstake unconfirmed audit write failed"));
+        throw new HttpError(502, "withdraw_unconfirmed", { txHash: err.hash });
+      }
+      logger.error({ err, stakeId: stake.id }, "unstake transfer failed");
+      await prisma.appgenStake.update({ where: { id: stake.id }, data: { withdrawnAt: null } });
+      throw new HttpError(502, "withdraw_failed");
+    }
+    const updated = await prisma.appgenStake.update({ where: { id: stake.id }, data: { withdrawTx } });
+    await writeAudit({
+      actorId: user.id,
+      actor: `user:${user.id}`,
+      action: "APPGEN_UNSTAKE",
+      targetType: "AppgenStake",
+      targetId: stake.id,
+      meta: { appId: stake.appId, wallet: stake.wallet, amount: big(stake.amount).toString(), earnedMicros: stake.earnedMicros.toString(), withdrawTx },
+      // The transfer already settled on chain; never fail the response on an audit write.
+    }).catch((err: unknown) => logger.error({ err, stakeId: stake.id }, "unstake audit write failed"));
+    const app = await prisma.app.findUnique({ where: { id: stake.appId }, select: APP_REF });
+    res.json(stakeDto(updated, app));
+  }),
+);
+
+/** Below $1 a staker-rewards claim is not worth the transaction fee. */
+const MIN_STAKER_CLAIM_MICROS = 1_000_000n;
+
+/**
+ * Pays a staker their accrued rewards (`earnedMicros` summed across active stakes) in ETH from the
+ * treasury, without unstaking. Each stake's earnings are taken by a guarded decrement before the
+ * payout, so a concurrent claim takes nothing, and restored if the payout fails — same guarantee as
+ * the launcher claim.
+ */
+export const claimStakerRewardsHandler = async (req: Request, res: Response): Promise<void> => {
+  assertPayoutsAllowed();
+  const u = req.user!;
+  if (!u.wallet) throw new HttpError(400, "wallet_required");
+
+  // A plain read does not lock: concurrent claims all read the same rows. An unconditional clear
+  // then succeeds for each of them, and each pays — or, under the floor, restores — the same
+  // earnings: the 2026-09-23 drain doubled dust past the floor and paid it up to six times. The
+  // guarded decrement is re-checked by Postgres against the row a concurrent claim committed, so
+  // exactly one claim takes each amount, and a sweep's share credited after the read stays put.
+  const stakes = await prisma.$transaction(async (tx) => {
+    const rows = await tx.appgenStake.findMany({
+      where: { wallet: u.wallet!, withdrawnAt: null, earnedMicros: { gt: 0n } },
+      select: { id: true, appId: true, earnedMicros: true },
+      orderBy: { id: "asc" },
+    });
+    const claimable = rows.reduce((acc, s) => acc + s.earnedMicros, 0n);
+    if (claimable < MIN_STAKER_CLAIM_MICROS) throw new HttpError(400, "nothing_to_claim", { claimableMicros: claimable.toString() });
+    const taken: typeof rows = [];
+    for (const s of rows) {
+      const { count } = await tx.appgenStake.updateMany({
+        where: { id: s.id, earnedMicros: { gte: s.earnedMicros } },
+        data: { earnedMicros: { decrement: s.earnedMicros } },
+      });
+      if (count === 1) taken.push(s);
+    }
+    return taken;
+  });
+
+  const total = stakes.reduce((acc, s) => acc + s.earnedMicros, 0n);
+  // Increment, never set: a fee sweep may have credited `earnedMicros` since the take above, and
+  // an absolute restore would overwrite that share.
+  const restore = async (): Promise<void> => {
+    for (const s of stakes) await prisma.appgenStake.update({ where: { id: s.id }, data: { earnedMicros: { increment: s.earnedMicros } } });
+  };
+  // A concurrent claim took some or all of the stakes first; what is left here is not worth paying.
+  if (total < MIN_STAKER_CLAIM_MICROS) {
+    await restore();
+    throw new HttpError(400, "nothing_to_claim", { claimableMicros: total.toString() });
+  }
+
+  const ethPriceUsd = await getEthPriceUsd();
+  const wei = weiFromUsdMicros(total, ethPriceUsd);
+  if (wei <= 0n) {
+    await restore();
+    throw new HttpError(400, "nothing_to_claim", { claimableMicros: total.toString() });
+  }
+
+  // Ledger rows per app + the treasury debit, written once the payout is known to have landed.
+  const byApp: Record<string, bigint> = {};
+  for (const s of stakes) byApp[s.appId] = (byApp[s.appId] ?? 0n) + s.earnedMicros;
+
+  let txHash: string;
+  try {
+    txHash = await transferEth(TREASURY_ACCOUNT, u.wallet as Address, wei);
+  } catch (err) {
+    if (err instanceof TransactionUnconfirmedError) {
+      // The rewards stay cleared; the reconcile pass writes the ledger rows on success or restores
+      // the stakes on revert.
+      logger.error({ err, userId: u.id, txHash: err.hash }, "staker rewards payout unconfirmed; left cleared for reconcile");
+      await writeAudit({
+        actorId: u.id,
+        actor: `user:${u.id}`,
+        action: "PAYOUT_UNCONFIRMED",
+        targetType: "User",
+        targetId: u.id,
+        meta: {
+          kind: "APPGEN_CLAIM",
+          txHash: err.hash,
+          userId: u.id,
+          usdMicros: total.toString(),
+          wei: wei.toString(),
+          stakes: stakes.map((s) => ({ id: s.id, appId: s.appId, earnedMicros: s.earnedMicros.toString() })),
+        },
+      }).catch((e: unknown) => logger.error({ err: e, userId: u.id }, "staker rewards unconfirmed audit write failed"));
+      throw new HttpError(502, "claim_unconfirmed", { txHash: err.hash });
+    }
+    await restore();
+    logger.error({ err, userId: u.id }, "staker rewards payout failed");
+    throw new HttpError(502, "claim_payout_failed");
+  }
+
+  await prisma.ledgerEntry.createMany({
+    data: [
+      ...Object.entries(byApp).map(([appId, micros]) => ({
+        account: `STAKERS:${appId}`,
+        deltaMicros: -micros,
+        refType: "Payout",
+        refId: u.id,
+        memo: `staker rewards ${txHash}`,
+      })),
+      { account: "TREASURY", deltaMicros: -total, refType: "Payout", refId: u.id, memo: `staker rewards ${txHash}` },
+    ],
+  });
+  await writeAudit({
+    actorId: u.id,
+    actor: `user:${u.id}`,
+    action: "APPGEN_CLAIM",
+    targetType: "AppgenStake",
+    targetId: u.id,
+    meta: { usdMicros: total.toString(), wei: wei.toString(), txHash, stakeCount: stakes.length },
+  }).catch((err: unknown) => logger.error({ err, userId: u.id }, "staker rewards audit write failed"));
+
+  res.json({ usdMicros: total.toString(), wei: wei.toString(), txHash, explorerUrl: explorerTxUrl(txHash as `0x${string}`) });
+};
+appgen.post("/claim", requireAuth, wrap(claimStakerRewardsHandler));

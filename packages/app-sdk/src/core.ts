@@ -1,0 +1,323 @@
+import { hasAppgenEnv, appgenEnv, appgenUrl } from "./env.js";
+import { NotAuthenticatedError, AppgenError } from "./errors.js";
+import type { HolderStatus, MeResult, AppgenUser } from "./types.js";
+
+interface SendOpts {
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
+function asRecord(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new AppgenError(`${what} did not return a JSON object`, { code: "bad_response" });
+  }
+  return value as Record<string, unknown>;
+}
+
+async function send(path: string, opts: SendOpts = {}): Promise<Response> {
+  const headers: Record<string, string> = { accept: "application/json", ...opts.headers };
+  const init: RequestInit = {
+    method: opts.method ?? "GET",
+    credentials: "include",
+    headers,
+  };
+  if (opts.body !== undefined) {
+    headers["content-type"] = "application/json";
+    init.body = JSON.stringify(opts.body);
+  }
+  try {
+    return await fetch(appgenUrl(path), init);
+  } catch (cause) {
+    throw new AppgenError(`request to ${path} failed: the platform is unreachable`, { code: "network", cause });
+  }
+}
+
+async function bodyOf(res: Response): Promise<unknown> {
+  if (res.status === 204) return null;
+  const text = await res.text();
+  if (text.trim() === "") return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new AppgenError(`${res.url} returned a non-JSON body (${res.status})`, {
+      status: res.status,
+      code: "bad_response",
+    });
+  }
+}
+
+/** Turns a non-2xx `{error}` response into the narrowest error class we have. */
+function failure(res: Response, body: unknown): AppgenError {
+  const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  const message = typeof record.error === "string" ? record.error : `request failed with status ${res.status}`;
+  if (res.status === 401) return new NotAuthenticatedError(message);
+  return new AppgenError(message, { status: res.status, code: `http_${res.status}` });
+}
+
+async function json(path: string, opts: SendOpts = {}): Promise<unknown> {
+  const res = await send(path, opts);
+  const body = await bodyOf(res);
+  if (!res.ok) throw failure(res, body);
+  return body;
+}
+
+/** A user record straight off the wire; anything without an `id` counts as "no session". */
+function parseUser(raw: unknown): AppgenUser | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const u = asRecord(raw, "user");
+  if (typeof u.id !== "string") return null;
+  return {
+    id: u.id,
+    wallet: typeof u.wallet === "string" ? u.wallet : null,
+    displayName: typeof u.displayName === "string" ? u.displayName : null,
+  };
+}
+
+export async function me(): Promise<MeResult> {
+  const body = asRecord(await json("/_appgen/me"), "GET /_appgen/me");
+  const holderRecord = asRecord(body.holder ?? {}, "GET /_appgen/me holder");
+  return {
+    user: parseUser(body.user),
+    holder: {
+      isHolder: holderRecord.isHolder === true,
+      balance: String(holderRecord.balance ?? "0"),
+      minHold: String(holderRecord.minHold ?? "0"),
+    },
+  };
+}
+
+export async function holder(): Promise<HolderStatus> {
+  return (await me()).holder;
+}
+
+/** Per-user key/value storage. `app` is the app-wide namespace server functions write to. */
+export const kv = {
+  async get<T = unknown>(key: string): Promise<T | null> {
+    const body = asRecord(await json(`/_appgen/kv/${encodeURIComponent(key)}`), "GET /_appgen/kv");
+    // Stored JSON is opaque to the platform; the caller declares its own shape via `T`.
+    const value = body.value as T | undefined;
+    return value ?? null;
+  },
+  async set<T = unknown>(key: string, value: T): Promise<void> {
+    await json(`/_appgen/kv/${encodeURIComponent(key)}`, { method: "PUT", body: { value } });
+  },
+  async del(key: string): Promise<void> {
+    await json(`/_appgen/kv/${encodeURIComponent(key)}`, { method: "DELETE" });
+  },
+  /** Read-only from the browser: the app namespace is written by `functions/*.js`. */
+  async app<T = unknown>(key: string): Promise<T | null> {
+    const body = asRecord(await json(`/_appgen/kv/app/${encodeURIComponent(key)}`), "GET /_appgen/kv/app");
+    const value = body.value as T | undefined;
+    return value ?? null;
+  },
+};
+
+/**
+ * Calls `functions/<name>.js` on the platform. A function declared with `auth: true` answers
+ * `401` (`NotAuthenticatedError`) for anonymous callers; `holderOnly: true` answers `403`.
+ */
+export async function fn<T = unknown>(name: string, input?: unknown): Promise<T> {
+  const path = `/_appgen/fn/${encodeURIComponent(name)}`;
+  const res = await send(path, { method: "POST", body: input ?? {} });
+  const body = await bodyOf(res);
+  if (!res.ok) throw failure(res, body);
+  // The host wraps the handler's return value: `{ result: <value> }`. Its shape is the app's own contract.
+  return asRecord(body, `POST ${path}`).result as T;
+}
+
+interface GoogleCredentialResponse {
+  credential?: string;
+}
+
+interface GooglePromptNotification {
+  isNotDisplayed?: () => boolean;
+  isSkippedMoment?: () => boolean;
+  isDismissedMoment?: () => boolean;
+}
+
+interface GoogleIdentity {
+  initialize: (config: {
+    client_id: string;
+    callback: (response: GoogleCredentialResponse) => void;
+    use_fedcm_for_prompt?: boolean;
+  }) => void;
+  prompt: (listener?: (notification: GooglePromptNotification) => void) => void;
+  cancel: () => void;
+  disableAutoSelect: () => void;
+}
+
+declare global {
+  interface Window {
+    google?: { accounts?: { id?: GoogleIdentity } };
+  }
+}
+
+const GIS_SRC = "https://accounts.google.com/gsi/client";
+const NO_GOOGLE =
+  "google sign-in is unavailable — window.__APPGEN__.googleClientId is empty. " +
+  "It is injected by the Appgen host; login works on the deployed app.";
+
+let gisLoad: Promise<GoogleIdentity> | null = null;
+
+/** Loads Google Identity Services once and resolves its `google.accounts.id` API. */
+function loadGoogleIdentity(): Promise<GoogleIdentity> {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return Promise.reject(new AppgenError("google sign-in requires a browser", { code: "no_window" }));
+  }
+  const existing = window.google?.accounts?.id;
+  if (existing) return Promise.resolve(existing);
+  if (gisLoad) return gisLoad;
+  gisLoad = new Promise<GoogleIdentity>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = GIS_SRC;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => {
+      const api = window.google?.accounts?.id;
+      if (api) resolve(api);
+      else reject(new AppgenError("Google Identity Services loaded without an id API", { code: "gis_load" }));
+    };
+    script.onerror = () => {
+      gisLoad = null;
+      reject(new AppgenError("could not load Google Identity Services", { code: "gis_load" }));
+    };
+    document.head.appendChild(script);
+  });
+  return gisLoad;
+}
+
+/** Opens the Google sign-in prompt and resolves the returned ID token (JWT credential). */
+async function requestGoogleCredential(clientId: string): Promise<string> {
+  const id = await loadGoogleIdentity();
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    id.initialize({
+      client_id: clientId,
+      callback: (response) => {
+        if (settled) return;
+        if (response?.credential) {
+          settled = true;
+          resolve(response.credential);
+        } else {
+          settled = true;
+          reject(new AppgenError("google sign-in returned no credential", { code: "google_login" }));
+        }
+      },
+      use_fedcm_for_prompt: true,
+    });
+    id.prompt((notification) => {
+      if (settled) return;
+      if (notification.isNotDisplayed?.() || notification.isSkippedMoment?.() || notification.isDismissedMoment?.()) {
+        settled = true;
+        reject(new AppgenError("google sign-in was dismissed", { code: "google_dismissed" }));
+      }
+    });
+  });
+}
+
+/** Exchanges a Google ID token (JWT credential) for the app's `appgen_app_session` cookie. */
+export async function exchange(credential: string): Promise<AppgenUser> {
+  const body = asRecord(await json("/_appgen/auth/exchange", { method: "POST", body: { credential } }), "exchange");
+  const user = parseUser(body.user);
+  if (!user) throw new AppgenError("exchange did not return a user", { code: "bad_response" });
+  return user;
+}
+
+/** Runs Google sign-in and trades the credential for the app session cookie. */
+export async function login(): Promise<AppgenUser> {
+  const clientId = appgenEnv().googleClientId;
+  if (!clientId) throw new AppgenError(NO_GOOGLE, { code: "no_google" });
+  const credential = await requestGoogleCredential(clientId);
+  return exchange(credential);
+}
+
+/** Drops the app session cookie and clears any Google auto-select. */
+export async function logout(): Promise<void> {
+  window.google?.accounts?.id?.disableAutoSelect();
+  await json("/_appgen/auth/logout", { method: "POST" });
+}
+
+/** One coin launched on Appgen, as the platform's public feed describes it (prices in USD, live). */
+export interface AppgenCoin {
+  id: string;
+  slug: string;
+  name: string;
+  ticker: string;
+  imageUrl: string;
+  oneLiner: string;
+  tokenAddress: string | null;
+  priceUsd: number;
+  mcapUsd: number;
+  change24hPct: number;
+  volume24hUsd: number;
+  holders: number;
+  /** 0 = bonding curve, 2 = Uniswap v4 pool. */
+  phase: number;
+  /** Curve progress 0..1. */
+  progress: number;
+  /** 0..1 activity index (fees + volume). */
+  heat: number;
+  status: string;
+  launchedAt: string | null;
+  /** Trade links: the coin page on Appgen and the pons launchpad. */
+  ponsUrl: string | null;
+  explorerUrl: string | null;
+  [extra: string]: unknown;
+}
+
+export interface AppgenCandle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+const qs = (params: Record<string, string | number | undefined>): string => {
+  const parts = Object.entries(params)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+  return parts.length ? `?${parts.join("&")}` : "";
+};
+
+/**
+ * Live data about every coin on Appgen, served from the app's own origin (`/_appgen/coins`), so apps
+ * can build on real prices, market caps and history without keys or CORS.
+ */
+export const coins = {
+  list: (opts: { sort?: "trending" | "new" | "heating" | "graduated" | "shipping"; limit?: number; cursor?: string } = {}) =>
+    json(`/_appgen/coins${qs({ sort: opts.sort, limit: opts.limit, cursor: opts.cursor })}`) as Promise<{ items: AppgenCoin[]; nextCursor: string | null }>,
+  get: async (slug: string) => ((await json(`/_appgen/coins/${encodeURIComponent(slug)}`)) as { app: AppgenCoin }).app,
+  candles: (slug: string, opts: { interval?: "1m" | "5m" | "15m" | "1h" | "4h" | "1d"; limit?: number } = {}) =>
+    json(`/_appgen/coins/${encodeURIComponent(slug)}/candles${qs({ interval: opts.interval, limit: opts.limit })}`) as Promise<{ interval: string; candles: AppgenCandle[]; supply: number }>,
+};
+
+let tracked = false;
+
+/** Records one session for the app's user count. Runs once per page load. */
+export async function track(): Promise<void> {
+  if (tracked) return;
+  tracked = true;
+  await json("/_appgen/track", { method: "POST" });
+}
+
+/** Everything an app needs without React. Mirrors the named exports of this module. */
+export const ship = {
+  get env() {
+    return appgenEnv();
+  },
+  me,
+  holder,
+  kv,
+  fn,
+  coins,
+  login,
+  exchange,
+  logout,
+  track,
+};
+
+// User counting is a load-time signal; a failure here must never break the app.
+if (hasAppgenEnv()) void track().catch(() => undefined);

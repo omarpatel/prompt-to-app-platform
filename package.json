@@ -1,0 +1,39 @@
+{
+  "name": "appgen",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AI app builder: Claude Agent SDK builds in E2B sandboxes, BullMQ workers, Prisma, React.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @appgen/shared -w @appgen/db -w @appgen/chain -w @appgen/app-sdk -w @appgen/api -w @appgen/runner -w @appgen/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "typecheck:tests": "tsc -p apps/api/test/tsconfig.json && tsc -p apps/runner/test/tsconfig.json",
+    "db:generate": "npm run generate -w @appgen/db",
+    "db:push": "npm run push -w @appgen/db",
+    "db:migrate": "npm run migrate -w @appgen/db",
+    "dev:api": "npm run dev -w @appgen/api",
+    "dev:runner": "npm run dev -w @appgen/runner",
+    "dev:web": "npm run dev -w @appgen/web"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "allowScripts": {
+    "prisma@6.19.3": true,
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.25.12": true
+  },
+  "dependencies": {
+    "e2b": "^2.50.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  },
+  "license": "MIT"
+}

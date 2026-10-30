@@ -1,0 +1,15 @@
+{
+  "name": "Appgen Starter",
+  "version": "0.1.0",
+  "entry": "index.html",
+  "functions": [
+    {
+      "name": "hello",
+      "auth": false,
+      "holderOnly": false
+    }
+  ],
+  "holderTier": {
+    "minHoldTokens": 100000
+  }
+}

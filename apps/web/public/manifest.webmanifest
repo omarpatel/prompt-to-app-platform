@@ -1,0 +1,10 @@
+{
+  "name": "Appgen",
+  "short_name": "Appgen",
+  "description": "An AI app builder: describe an app and an agent builds and hosts it.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
