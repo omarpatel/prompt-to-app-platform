@@ -87,7 +87,7 @@ const Loaded = ({ app }: { app: AppDetailDto }) => {
   const stats = useStats();
   // Every chain amount on this page is in the app's native asset; price it with the matching feed.
   const nativePriceUsd = (app.chain === "solana" ? stats.data?.solPriceUsd : stats.data?.ethPriceUsd) ?? 0;
-  // The coin-burn ledger only exists for pump.fun coins; a Robinhood Chain coin's 25% buys and burns APPGEN (see /burns).
+  // The coin-burn ledger only exists for pump.fun coins; a Robinhood Chain coin's 25% goes to the platform treasury.
   const tabs = useMemo(() => (app.coinBurns ? TABS : TABS.filter((t) => t.id !== "burns")), [app.coinBurns]);
 
   const tabParam = params.get("tab");

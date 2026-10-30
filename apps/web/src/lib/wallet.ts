@@ -104,7 +104,7 @@ export const ensureChain = async (provider: Eip1193Provider): Promise<void> => {
 
 /**
  * Request accounts without touching the wallet's network. Enough for a chain-agnostic EOA
- * `personal_sign` (the refund link), and works in wallets that cannot add Robinhood Chain.
+ * `personal_sign`, and works in wallets that cannot add Robinhood Chain.
  */
 export const requestAccount = async (provider: Eip1193Provider): Promise<Address> => {
   const accounts = (await provider.request({ method: "eth_requestAccounts" })) as string[];

@@ -12,7 +12,7 @@ export const env = {
   googleClientId: read("VITE_GOOGLE_CLIENT_ID") ?? "",
   /** Wildcard app host (`<slug>.example.com`). Empty → path routing through the API. */
   appDomain: read("VITE_APP_DOMAIN") ?? "",
-  /** The $APPGEN token address once launched; empty until then. */
+  /** Platform treasury token address on Robinhood Chain; empty when unset. */
   appgenToken: read("VITE_APPGEN_TOKEN") ?? "",
   chainId: Number(read("VITE_CHAIN_ID") ?? ROBINHOOD_CHAIN_ID),
   explorerUrl: (read("VITE_EXPLORER_URL") ?? EXPLORER_URL).replace(/\/+$/, ""),

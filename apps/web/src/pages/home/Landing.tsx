@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Link } from "react-router-dom";
 import { FEE_SPLIT_BPS, LAUNCH_STAKE_BY_CHAIN, MIN_BUILD_BUDGET_USD, MIN_BUYBACK_USD, type StatsDto } from "@appgen/shared";
 import type { Format } from "@number-flow/react";
-import { SOL, formatCount, formatEth, formatNative } from "../../lib/format.js";
+import { SOL, formatCount, formatNative } from "../../lib/format.js";
 import { useReducedMotion } from "../../lib/motion.js";
 import { Button, NumberFlow, cx } from "../../ui/index.js";
 import { IconArrowRight } from "../../components/icons.js";
@@ -258,8 +257,7 @@ export const Landing = ({ stats }: { stats: StatsDto | undefined }) => (
       </div>
       {stats && (
         <p className="num mt-3 text-12 text-ink-3">
-          right now: {formatCount(stats.appsLive)} apps live · {formatNative(stats.feesTotalLamports, SOL, { digits: 2 })} fees claimed · {formatEth(stats.burnedEthWei)} of APPGEN burned on Robinhood
-          Chain to date. not financial advice.
+          right now: {formatCount(stats.appsLive)} apps live · {formatNative(stats.feesTotalLamports, SOL, { digits: 2 })} fees claimed to date. not financial advice.
         </p>
       )}
     </section>
@@ -275,9 +273,6 @@ export const Landing = ({ stats }: { stats: StatsDto | undefined }) => (
         <Button variant="primary" size="lg" href="/launch" iconRight={<IconArrowRight size={16} />}>
           Launch
         </Button>
-        <Link to="/burns" className="inline-flex h-12 items-center rounded-pill px-5 text-15 font-medium text-ink-2 hover:bg-fill hover:text-ink">
-          read the burn ledger
-        </Link>
       </div>
     </section>
   </div>

@@ -1,10 +1,10 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import type { AppSummaryDto, AppsPageDto } from "@appgen/shared";
-import { flatPages, useApps, useBurns } from "../../api/queries.js";
-import { LiveTape, useTape, type TapeRow } from "../../components/LiveTape.js";
+import { flatPages, useApps } from "../../api/queries.js";
+import { LiveTape, useTape } from "../../components/LiveTape.js";
 import { useLiveFrames } from "../../layout/LiveContext.js";
-import { formatEth, formatTokenUnits, formatUsdCompact, timeAgo } from "../../lib/format.js";
+import { formatUsdCompact } from "../../lib/format.js";
 import { Avatar, Skeleton, cx } from "../../ui/index.js";
 
 const MiniList = ({ title, href, apps, right, tone }: { title: string; href: string; apps: AppSummaryDto[] | undefined; right: (a: AppSummaryDto) => string; tone: "burn" | "earn" }) => (
@@ -42,28 +42,11 @@ const MiniList = ({ title, href, apps, right, tone }: { title: string; href: str
 
 /** Live tape, the five hottest coins, the five coins shipping right now. */
 export const Rail = () => {
-  const { rows, push, setPaused, seed: seedTape } = useTape();
+  const { rows, push, setPaused } = useTape();
   const state = useLiveFrames(push);
   const heating = useApps("heating");
   const shipping = useApps("shipping");
-  const burns = useBurns();
 
-  // Seed the tape with the newest APPGEN burns so it is not blank on arrival.
-  const seed = burns.data?.pages[0]?.items;
-  useEffect(() => {
-    if (!seed || seed.length === 0) return;
-    const seeded: TapeRow[] = seed.slice(0, 12).map((b) => ({
-      id: `seed:${b.id}`,
-      at: b.createdAt,
-      slug: "appgen",
-      ticker: "APPGEN",
-      kind: "burn",
-      amount: formatTokenUnits(b.burnedUnits),
-      detail: formatEth(b.ethWei),
-      href: "/burns",
-    }));
-    seedTape((prev) => (prev.length === 0 ? seeded : prev));
-  }, [seed, seedTape]);
 
   const top5 = (data: { pages: AppsPageDto[] } | undefined) => (data ? flatPages(data.pages).slice(0, 5) : undefined);
   const heatingTop = useMemo(() => top5(heating.data), [heating.data]);
@@ -74,11 +57,6 @@ export const Rail = () => {
       <LiveTape rows={rows} live={state === "open"} onPause={setPaused} height={320} />
       <MiniList title="heating up" href="/?sort=heating" apps={heatingTop} tone="burn" right={(a) => `${Math.round(a.heat * 100)}°`} />
       <MiniList title="shipping now" href="/?sort=shipping" apps={shippingTop} tone="earn" right={(a) => formatUsdCompact(a.budgetMicros)} />
-      {seed && seed[0] && (
-        <p className="num px-1 text-12 text-ink-3">
-          last APPGEN burn {timeAgo(seed[0].createdAt)} · {burns.data?.pages[0]?.totals.burns ?? 0} burns total
-        </p>
-      )}
     </aside>
   );
 };

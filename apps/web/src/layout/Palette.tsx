@@ -4,7 +4,7 @@ import { useAppSearch } from "../api/queries.js";
 import { formatUsdCompact } from "../lib/format.js";
 import { EVM_ADDRESS, SOLANA_ADDRESS } from "../lib/venue.js";
 import { Avatar, CommandK, Kbd, type CommandItem } from "../ui/index.js";
-import { IconApps, IconBurn, IconLaunch, IconAppgen, IconUser } from "../components/icons.js";
+import { IconApps, IconLaunch, IconUser } from "../components/icons.js";
 
 /**
  * ⌘K. Searches coins by name, ticker, slug or token address through
@@ -32,8 +32,6 @@ export const Palette = ({ open, onClose }: { open: boolean; onClose: () => void 
     const actions: CommandItem[] = [
       { id: "go:launch", group: "go to", label: "Launch a coin", hint: "/launch", icon: <IconLaunch />, keywords: ["launch", "new", "create", "pump.fun", "solana"], onSelect: go("/launch") },
       { id: "go:apps", group: "go to", label: "App store", hint: "/apps", icon: <IconApps />, keywords: ["apps", "store"], onSelect: go("/apps") },
-      { id: "go:burns", group: "go to", label: "APPGEN burns", hint: "/burns", icon: <IconBurn />, keywords: ["burns", "ledger", "appgen"], onSelect: go("/burns") },
-      { id: "go:appgen", group: "go to", label: "$APPGEN", hint: "/appgen", icon: <IconAppgen />, keywords: ["appgen", "token"], onSelect: go("/appgen") },
       { id: "go:me", group: "go to", label: "Your account", hint: "/me", icon: <IconUser />, keywords: ["me", "account", "wallet", "balances"], onSelect: go("/me") },
     ];
     // With a query, coin results lead; the palette's own substring filter

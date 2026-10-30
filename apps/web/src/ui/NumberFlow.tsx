@@ -51,7 +51,7 @@ export const NativeFlow = ({ units, native, digits = 4, className }: { units: bi
   <NumberFlow value={Number(units) / 10 ** native.decimals} format={{ minimumFractionDigits: digits, maximumFractionDigits: digits }} suffix={` ${native.symbol}`} className={className} />
 );
 
-/** ETH from wei as an odometer — Robinhood-only amounts (APPGEN burns, treasury). */
+/** ETH from wei as an odometer — Robinhood-only amounts (treasury). */
 export const EthFlow = ({ wei, digits = 4, className }: { wei: bigint | number; digits?: number; className?: string }) => (
   <NativeFlow units={wei} native={{ symbol: "ETH", decimals: 18 }} digits={digits} className={className} />
 );

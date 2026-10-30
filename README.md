@@ -10,11 +10,10 @@ The code calls the product "Appgen". It is an npm-workspaces TypeScript monorepo
 
 1. **Intake.** The `intake` worker moderates the prompt and turns it into a spec (purpose, audience, MVP list, optional holder tier). The launcher approves the spec before anything is created.
 2. **Launch.** The `launch` worker creates the coin through `adapterFor(launchpad)` in `@appgen/chain`, from a wallet derived for that app. A refundable stake (`LAUNCH_STAKE_BY_CHAIN`) is the spam control and is returned at the first build.
-3. **Fees.** Every 5 minutes the `feeSweep` worker claims creator fees and splits them with `splitFees` in `@appgen/shared`: a build budget, a 25% buy-and-burn share and a launcher share, plus an optional fork royalty and staker share.
+3. **Fees.** Every 5 minutes the `feeSweep` worker claims the app's creator fees and splits them with `splitFees` in `@appgen/shared`. Most of each claim becomes the app's build budget; the rest goes to the launcher and to a per-coin ledger account.
 4. **Build.** Once the budget clears the threshold, the scheduler enqueues a build. `apps/runner/src/build` starts an E2B sandbox from the `appgen-builder` template, copies in `template/`, and runs the agent against it. The output has to pass `npm run build`, a Playwright smoke test, screenshots and a reviewer model before `deploy.ts` publishes it.
 5. **Hosting.** The API serves each app on its own subdomain (`apps/api/src/host`). Server functions run in a QuickJS sandbox with CPU and memory limits, and model calls go through an Anthropic proxy that charges each job against its own budget token.
-6. **Burn.** The `buyback` worker spends the 25% share on the coin, burns it, and writes an attestation transaction that hashes the fee claims that paid for it.
-7. **Reconcile.** Every 5 minutes the `reconcile` worker checks jobs, sandboxes, job tokens, payouts, the ledger, escrow claims and burns for drift and writes a `ReconcileRun` row per check.
+6. **Reconcile.** Every 5 minutes the `reconcile` worker checks jobs, sandboxes, job tokens, payouts, the ledger and escrow claims for drift and writes a `ReconcileRun` row per check.
 
 Generated apps never contain auth, wallet or network code. The template's lint rules ban `fetch`, `XMLHttpRequest`, `WebSocket` and `eval`, and apps reach platform features (auth, KV, functions, LLM calls, holder gate) only through `@appgen/app-sdk`.
 

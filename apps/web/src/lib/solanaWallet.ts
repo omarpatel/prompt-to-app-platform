@@ -1,6 +1,6 @@
 /*
  * Injected Solana wallets, for the one place the web asks a user to sign with their own
- * Solana key: proving the payout wallet for a APPGEN refund. No adapter library — the three
+ * Solana key: proving ownership of a payout wallet. No adapter library — the three
  * wallets people actually use expose the same legacy provider shape (`connect`,
  * `signMessage(Uint8Array)`), and anything else that injects `window.solana` speaks it too.
  */

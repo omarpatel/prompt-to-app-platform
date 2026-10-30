@@ -20,7 +20,7 @@ const toneClass = (tone?: string) => (tone === "build" ? "text-build" : tone ===
 /**
  * Where every unit goes. Creator fees split 60 / 25 / 15 to the agent, the 25% leg and the
  * launcher. On a pump.fun coin the 25% buys and burns the coin itself; on a legacy Robinhood
- * Chain coin it funds APPGEN refunds while holders are owed, then buys and burns APPGEN.
+ * Chain coin it goes to the platform treasury.
  * Accrued = claimed and booked; accruing = still on the curve, hook, vault or escrow, not yet split.
  */
 export const FeeTable = ({ app }: { app: AppDetailDto }) => {
@@ -43,7 +43,7 @@ export const FeeTable = ({ app }: { app: AppDetailDto }) => {
 
   const feeRows: FeeRow[] = [
     { key: "agent", label: "Agent budget", share: app.feeSplit.buildBudget, units: (feesWei * BigInt(app.feeSplit.buildBudget)) / 10_000n, micros: booked.build, tone: "build" },
-    { key: "burn", label: solana ? `$${app.ticker} buy-and-burn` : "APPGEN refunds, then APPGEN burn", share: burnBps, units: (feesWei * BigInt(burnBps)) / 10_000n, micros: booked.burn, tone: "accent" },
+    { key: "burn", label: solana ? `$${app.ticker} buy-and-burn` : "platform treasury", share: burnBps, units: (feesWei * BigInt(burnBps)) / 10_000n, micros: booked.burn, tone: "accent" },
     { key: "launcher", label: "Launcher", share: app.feeSplit.launcher, units: (feesWei * BigInt(app.feeSplit.launcher)) / 10_000n, micros: booked.launcher, tone: "earn" },
   ];
 
@@ -66,7 +66,7 @@ export const FeeTable = ({ app }: { app: AppDetailDto }) => {
       <p className="small px-4 py-3 text-ink-3 sm:px-5">
         {solana
           ? "pump.fun pays this app’s wallet a creator fee on every trade — 0.30% on the curve, a tiered share on the PumpSwap pool; the rates are pump.fun’s and can change. Appgen claims the vault, converts at the SOL price of the moment, and books the split above."
-          : "A legacy Robinhood Chain coin. pons charges 1% on every fill; 70% of that plus 100% of any creator tax reaches this app’s wallet and is swept to escrow. Appgen claims it, converts at the ETH price of the moment, and books the split above. The 25% share funds APPGEN refunds until every snapshot holder is refunded, then goes back to buying and burning APPGEN."}
+          : "A legacy Robinhood Chain coin. pons charges 1% on every fill; 70% of that plus 100% of any creator tax reaches this app’s wallet and is swept to escrow. Appgen claims it, converts at the ETH price of the moment, and books the split above. The 25% share is credited to the platform treasury."}
       </p>
     </Card>
   );

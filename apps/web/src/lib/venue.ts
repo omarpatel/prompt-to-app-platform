@@ -31,7 +31,7 @@ const bind = (meta: VenueMeta, cluster: SolanaCluster | undefined): VenueLinks =
   token: (token) => meta.explorerTokenUrl(token, cluster),
 });
 
-/** Robinhood Chain links: legacy coins, Robinhood APPGEN, the treasury, launcher payouts, refund proofs. Honours `VITE_EXPLORER_URL`. */
+/** Robinhood Chain links: coins, the treasury, launcher payouts. Honours `VITE_EXPLORER_URL`. */
 export const ROBINHOOD: VenueLinks = { meta: VENUES.pons_v2, tx: explorerTx, address: explorerAddress, token: explorerToken };
 
 export const venuesKey = ["venues"] as const;

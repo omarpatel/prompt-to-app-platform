@@ -478,7 +478,7 @@ export const UiGallery = () => {
         <Section id="table" title="Table" note="Dense ledger: sticky mono header, numeric cells right-aligned in tabular mono.">
           <Card padding={0}>
             <Table
-              caption="APPGEN burn ledger"
+              caption="Burn ledger"
               maxHeight={260}
               dense
               rows={ledger}
@@ -791,7 +791,7 @@ export const UiGallery = () => {
                 <Skeleton className="h-9 flex-1" rounded="card" />
               </div>
             </Card>
-            <EmptyState title="No burns yet" body="The APPGEN_TOKEN ledger has not cleared $5. Burns appear here as the treasury executes them." action={<Button size="sm">Open $APPGEN</Button>} />
+            <EmptyState title="No burns yet" body="The burn ledger has not cleared $5. Burns appear here as the treasury executes them." action={<Button size="sm">Open ledger</Button>} />
             <EmptyState
               variant="ash"
               title="$LEDGR is ash"

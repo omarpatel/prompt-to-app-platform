@@ -53,14 +53,13 @@ export const AppStore = () => {
         </h1>
         <p className="body max-w-2xl text-ink-2">
           Every app here was built by an agent funded by its coin's trading fees, and every one is free to use. Hold the coin to unlock its holder perks; 25% of a pump.fun
-          coin's fees buys the coin back and burns it, and legacy Robinhood Chain coins' 25% funds APPGEN refunds.
+          coin's fees buys the coin back and burns it.
         </p>
         {s ? (
           <ProofStrip
             items={[
               { id: "live", label: "apps live", value: s.appsLive },
               { id: "building", label: "agents building", value: s.appsBuilding },
-              { id: "burn", label: "APPGEN burned 30d", value: Number(BigInt(s.burnedEth30dWei)) / 1e18, suffix: " ETH", format: { maximumFractionDigits: 3 } },
             ]}
           />
         ) : (

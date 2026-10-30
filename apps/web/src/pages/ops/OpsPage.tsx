@@ -35,7 +35,7 @@ const useKill = () => {
 const PAUSES: ReadonlyArray<{ key: string; label: string; detail: string }> = [
   { key: "pause_builds", label: "Pause builds", detail: "No new build jobs start. Running jobs finish." },
   { key: "pauseFeeSweep", label: "Pause fee sweeps", detail: "Fees keep accruing on the curve / hook and in escrow; nothing is claimed or split." },
-  { key: "pauseBuyback", label: "Pause APPGEN burns", detail: "The APPGEN_TOKEN ledger keeps accruing; no swaps, no burns." },
+  { key: "pauseBuyback", label: "Pause buybacks", detail: "Burn ledgers keep accruing; no swaps, no burns." },
 ];
 
 const ALERT_TONE: Record<OpsDto["alerts"][number]["level"], ChipTone> = { info: "build", warn: "warn", critical: "burn" };
@@ -257,8 +257,8 @@ export const OpsPage = () => {
           <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-13">
             <Kv k="Fees total" v={`${formatEth(d.money.feesTotalWei)} · ${formatNative(d.money.feesTotalLamports, SOL)}`} />
             <Kv k="Fees 24h" v={`${formatEth(d.money.fees24hWei)} · ${formatNative(d.money.fees24hLamports, SOL)}`} tone="earn" />
-            <Kv k="APPGEN burns pending" v={String(d.money.appgenBurnsPending)} />
-            <Kv k="APPGEN burns stuck" v={String(d.money.appgenBurnsStuck)} tone={d.money.appgenBurnsStuck > 0 ? "burn" : undefined} />
+            <Kv k="treasury burns pending" v={String(d.money.appgenBurnsPending)} />
+            <Kv k="treasury burns stuck" v={String(d.money.appgenBurnsStuck)} tone={d.money.appgenBurnsStuck > 0 ? "burn" : undefined} />
             <Kv k="Coin burns pending" v={String(d.money.coinBurnsPending)} />
             <Kv k="Coin burns stuck" v={String(d.money.coinBurnsStuck)} tone={d.money.coinBurnsStuck > 0 ? "burn" : undefined} />
             <Kv k="Credit fundings stuck" v={String(d.money.creditFundingsStuck)} tone={d.money.creditFundingsStuck > 0 ? "burn" : undefined} />

@@ -4,7 +4,7 @@ import { isHttpError } from "../api/client.js";
 import { useStats } from "../api/queries.js";
 import type { GlobalFrame } from "../api/types.js";
 import { Lockup, Mark } from "../components/Lockup.js";
-import { IconApps, IconBurn, IconGitHub, IconHome, IconLaunch, IconAppgen, IconRefresh, IconSearch, IconUser } from "../components/icons.js";
+import { IconApps, IconGitHub, IconHome, IconLaunch, IconRefresh, IconSearch, IconUser } from "../components/icons.js";
 import { Button, Kbd, ProofStrip, Toaster, cx, type ProofItem } from "../ui/index.js";
 import { AccountMenu } from "./AccountMenu.js";
 import { LiveProvider, useLiveFrames } from "./LiveContext.js";
@@ -16,8 +16,6 @@ const Palette = lazy(async () => ({ default: (await import("./Palette.js")).Pale
 const NAV: ReadonlyArray<{ to: string; label: string; icon: (p: { size?: number; className?: string }) => ReactNode }> = [
   { to: "/", label: "Home", icon: IconHome },
   { to: "/apps", label: "Apps", icon: IconApps },
-  { to: "/burns", label: "Burns", icon: IconBurn },
-  { to: "/appgen", label: "$APPGEN", icon: IconAppgen },
 ];
 
 const MOBILE_NAV = [...NAV.slice(0, 3), { to: "/me", label: "Me", icon: IconUser }] as const;
@@ -47,7 +45,7 @@ const RouteError = () => {
 
 /**
  * Proof Strip: three live network numbers in the nav. Seeded from
- * `/v1/stats` (ETH burned = every APPGEN burn), nudged by SSE frames so a
+ * `/v1/stats`, nudged by SSE frames so a
  * launch rolls the counter before the next poll lands.
  */
 const Proof = ({ compact }: { compact?: boolean }) => {
@@ -135,7 +133,7 @@ const Footer = () => (
         <Lockup height={20} />
         <p className="small mt-3 max-w-sm text-ink-2">
           every app gets a coin. coins launch on pump.fun. fees pay an agent to build the app; 25% of every coin's fees buys the coin back and <span className="text-ink">burns</span> it.
-          Robinhood Chain coins send their 25% to the APPGEN buy-and-burn.
+         
         </p>
         <p className="micro mt-3 max-w-sm text-ink-3">coins are not investments. apps can fail. buybacks are burns, never distributions. not financial advice.</p>
         <div className="mt-4 flex items-center gap-3">
@@ -154,9 +152,6 @@ const Footer = () => (
           {[
             ["/launch", "launch a coin"],
             ["/apps", "app store"],
-            ["/burns", "burn ledger"],
-            ["/appgen", "$APPGEN"],
-            ["/governance", "governance"],
             ["/status", "status"],
           ].map(([to, label]) => (
             <li key={to}>

@@ -35,7 +35,7 @@ export const ShareCoin = () => {
           <>
             apps built by an AI agent.
             <br />
-            every fee <em>burns</em> APPGEN.
+            every fee <em>builds</em> the app.
           </>
         )
       }

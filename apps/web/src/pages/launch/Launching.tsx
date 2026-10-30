@@ -9,7 +9,7 @@ import { useTxReceipt } from "./hooks.js";
 
 const shareCoin = async (launch: LaunchDraftDto) => {
   const url = `${window.location.origin}/c/${launch.slug}`;
-  const burns = launch.chain === "solana" ? `every fee burns $${launch.ticker}` : "25% of its fees funds APPGEN refunds";
+  const burns = launch.chain === "solana" ? `every fee burns $${launch.ticker}` : "25% of its fees goes to the platform treasury";
   const text = `$${launch.ticker} just ignited on Appgen — its creator fees fund an agent that builds ${launch.name}; ${burns}.`;
   try {
     if (navigator.share) {

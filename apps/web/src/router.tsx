@@ -14,10 +14,7 @@ const Home = lazy(async () => ({ default: (await import("./pages/home/Home.js"))
 const Launch = lazy(async () => ({ default: (await import("./pages/launch/Launch.js")).Launch }));
 const CoinPage = lazy(async () => ({ default: (await import("./pages/coin/CoinPage.js")).CoinPage }));
 const AppStore = lazy(async () => ({ default: (await import("./pages/apps/AppStore.js")).AppStore }));
-const Burns = lazy(async () => ({ default: (await import("./pages/burns/Burns.js")).Burns }));
 const MePage = lazy(async () => ({ default: (await import("./pages/me/MePage.js")).MePage }));
-const AppgenPage = lazy(async () => ({ default: (await import("./pages/appgen/AppgenPage.js")).AppgenPage }));
-const Governance = lazy(async () => ({ default: (await import("./pages/governance/Governance.js")).Governance }));
 const OpsPage = lazy(async () => ({ default: (await import("./pages/ops/OpsPage.js")).OpsPage }));
 const Status = lazy(async () => ({ default: (await import("./pages/status/Status.js")).Status }));
 const LegalPage = lazy(async () => ({ default: (await import("./pages/legal/LegalPage.js")).LegalPage }));
@@ -114,10 +111,7 @@ export const router = createBrowserRouter([
       { path: "launch", element: page(<Launch />, "form") },
       { path: "c/:slug", element: page(<CoinPage />, "detail") },
       { path: "apps", element: page(<AppStore />, "feed") },
-      { path: "burns", element: page(<Burns />, "list") },
       { path: "me", element: page(<MePage />, "list", true) },
-      { path: "appgen", element: page(<AppgenPage />, "detail") },
-      { path: "governance", element: page(<Governance />, "list") },
       { path: "ops", element: page(<OpsPage />, "list", true) },
       { path: "status", element: page(<Status />, "short") },
       { path: "legal", element: <Navigate to="/legal/terms" replace /> },

@@ -121,7 +121,7 @@ export const formatNative = (units: Amount, native: NativeUnit, opts: { unit?: b
   return opts.unit === false ? s : `${s} ${native.symbol}`;
 };
 
-/** Wei → "0.0420 ETH": amounts that only ever exist on Robinhood Chain (APPGEN burns, treasury, launcher payouts, bounties). */
+/** Wei → "0.0420 ETH": amounts that only ever exist on Robinhood Chain (treasury, launcher payouts, bounties). */
 export const formatEth = (wei: Amount, opts: { unit?: boolean; digits?: number } = {}): string => formatNative(wei, ETH, opts);
 
 /** Display number of whole native units (never feed back into money math). */

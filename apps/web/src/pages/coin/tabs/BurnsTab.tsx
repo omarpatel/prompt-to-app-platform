@@ -36,8 +36,8 @@ export const BurnsTab = ({ app }: { app: AppDetailDto }) => {
   if (!totals)
     return (
       <EmptyState
-        title="This coin's 25% buys and burns APPGEN"
-        body="A Robinhood Chain coin never burns itself. Its 25% fee share buys and burns APPGEN. See the APPGEN burn history."
+        title="This coin's 25% goes to the treasury"
+        body="A Robinhood Chain coin never burns itself. Its 25% fee share is credited to the platform treasury ledger."
       />
     );
 
@@ -83,7 +83,7 @@ export const BurnsTab = ({ app }: { app: AppDetailDto }) => {
       )}
       <p className="small text-ink-3">
         Every row is a swap, a <span className="num">burnChecked</span> that lowers the mint's supply for good, and a memo transaction carrying the hash of the fee claims that paid for it. Burns
-        reduce supply; nothing is paid to holders. This coin's fees never buy APPGEN: the burn share only ever buys this coin.
+        reduce supply; nothing is paid to holders. The burn share only ever buys this coin.
       </p>
     </div>
   );

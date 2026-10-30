@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
-import type { AppDetailDto, AppSort, AppSummaryDto, AppsPageDto, BurnsPageDto, MeDto, StatsDto } from "@appgen/shared";
+import type { AppDetailDto, AppSort, AppSummaryDto, AppsPageDto, MeDto, StatsDto } from "@appgen/shared";
 import { api, getSessionToken, qs } from "./client.js";
 import type { GlobalFrame, StatusDto } from "./types.js";
 import { useSse } from "./sse.js";
@@ -49,15 +49,6 @@ export const useApp = (slug: string | undefined) =>
     queryFn: ({ signal }) => api.get<AppDetailDto>(`/v1/apps/${slug}`, signal),
     enabled: !!slug,
     refetchInterval: 15_000,
-  });
-
-export const useBurns = () =>
-  useInfiniteQuery({
-    queryKey: keys.burns,
-    queryFn: ({ pageParam, signal }) => api.get<BurnsPageDto>(`/v1/burns${qs({ cursor: pageParam, limit: 50 })}`, signal),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => last.nextCursor,
-    refetchInterval: 30_000,
   });
 
 /** The signed-in user. Disabled without a stored session so it never 401s on a cold visit. */
